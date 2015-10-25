@@ -18,26 +18,60 @@ def loadappend_data(PATH, train="train.csv", test="test.csv"):
     :param test: name of test file
     :return: training, validation, test
     """
-    non_test = pd.read_csv(PATH + train)
+    train = pd.read_csv(PATH + train)
     test = pd.read_csv(PATH + test)
     # create train test indicator
-    non_test['is_test'] = 0
+    train['is_test'] = 0
     test['is_test'] = 1
-    all_data = non_test.append(test, ignore_index=True)
+    all_data = train.append(test, ignore_index=True)
     return all_data
+
+def conv_fltdt_to_dt(yr, mnth, dy):
+    """
+    Dates can be a hassle when they are separate columns and stores as floats
+    with missings. This is a wrapper to convert these to py dates
+    :param year: float
+    :param month: float
+    :param day: float
+    :return: dates
+    """
+    dates = yr * 10000 + mnth * 100 + dy
+    dates = dates.fillna('19000101').astype('int').astype('str')
+    return pd.to_datetime(dates, format="%Y%m%d")
+
 
 def clean_rossman(PATH):
     df = loadappend_data(RAW)
-    # clean stores data
+    # load data about indvidual stores
     stores = pd.read_csv(RAW + 'store.csv')
+    # encode strings
     enc = LabelEncoder()
-    stores['StoreType'] = enc.fit_transform(stores.StoreType)
-    stores['Assortment'] = enc.fit_transform(stores.Assortment)
-
+    cols_to_encode = ['StoreType', 'Assortment', 'PromoInterval']
+    for col in cols_to_encode:
+        stores[col] = enc.fit_transform(stores[col])
+    # rename cols
+    new_names = [w.replace('Competition', '').replace('Since', '')
+              for w in stores.columns]
+    stores.columns = new_names
+    # create continuous date variable
+    stores['open_since'] = stores.OpenYear * 100 + stores.OpenMonth
+    stores['promo_since'] = stores.Promo2Year * 100 + stores.Promo2Week
     df = df.merge(stores, on='Store')
+    # fill missings
+    df.fillna(-1, inplace=True)
     return df
 
-clean_rossman(RAW)
+def tag_validation(df, val_pct=.2):
+    df.sort('Date', inplace=True)
+    # determine val obs
+    trn_obs = len(df.ix[df.is_test == 0, 1])
+    val_obs = int(trn_obs * (1 - val_pct))
+    # create var
+    df['is_val'] = 0
+    df['is_val'][val_obs:trn_obs] = 1
+    return df
+
+
 
 def create_feat_list(df, non_features):
     feats = list(df.columns.values)
