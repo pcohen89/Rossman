@@ -3,8 +3,9 @@ __author__ = 'loaner'
 
 ################################ Imports ###################################
 import pandas as pd
+import numpy as np
 from sklearn.preprocessing import LabelEncoder
-
+from sklearn.ensemble import RandomForestRegressor
 
 
 ################################ Globals ###################################
@@ -26,22 +27,12 @@ def loadappend_data(PATH, train="train.csv", test="test.csv"):
     all_data = train.append(test, ignore_index=True)
     return all_data
 
-def conv_fltdt_to_dt(yr, mnth, dy):
-    """
-    Dates can be a hassle when they are separate columns and stores as floats
-    with missings. This is a wrapper to convert these to py dates
-    :param year: float
-    :param month: float
-    :param day: float
-    :return: dates
-    """
-    dates = yr * 10000 + mnth * 100 + dy
-    dates = dates.fillna('19000101').astype('int').astype('str')
-    return pd.to_datetime(dates, format="%Y%m%d")
-
 
 def clean_rossman(PATH):
-    df = loadappend_data(RAW)
+    df = loadappend_data(PATH)
+    # encode date and strs
+    df['py_date'] = df.Date.apply(lambda x: pd.to_datetime(x).toordinal())
+    df['holiday'] = LabelEncoder().fit_transform(df.StateHoliday)
     # load data about indvidual stores
     stores = pd.read_csv(RAW + 'store.csv')
     # encode strings
@@ -57,6 +48,8 @@ def clean_rossman(PATH):
     stores['open_since'] = stores.OpenYear * 100 + stores.OpenMonth
     stores['promo_since'] = stores.Promo2Year * 100 + stores.Promo2Week
     df = df.merge(stores, on='Store')
+    # tag validtion
+    df = tag_validation(df)
     # fill missings
     df.fillna(-1, inplace=True)
     return df
@@ -71,6 +64,28 @@ def tag_validation(df, val_pct=.2):
     df['is_val'][val_obs:trn_obs] = 1
     return df
 
+
+def rmsle(actual, predicted):
+    """
+    #### __author__ = 'benhamner'
+    Computes the root mean squared log error.
+    This function computes the root mean squared log error between two lists
+    of numbers.
+    Parameters
+    ----------
+    actual : list of numbers, numpy array
+             The ground truth value
+    predicted : same type as actual
+                The predicted value
+    Returns
+    -------
+    score : double
+            The root mean squared log error between actual and predicted
+    """
+    sle_val = (np.power(np.log(np.array(actual)+1) -
+               np.log(np.array(predicted)+1), 2))
+    msle_val = np.mean(sle_val)
+    return np.sqrt(msle_val)
 
 
 def create_feat_list(df, non_features):
@@ -123,13 +138,49 @@ def check_weight_and_merge(dict, name):
     print "The total weight should be 1.0, it is: %s" % (total_weight)
     merge_subms(dict, SUBM_PATH, name, 'cost')
 
+def feat_importances(frst, feats):
+    outputs = pd.DataFrame({'feats': feats,
+                            'weight': frst.feature_importances_})
+    outputs = outputs.sort(columns='weight', ascending=False)
+    return outputs
 
 
+# Thanks to Chenglong Chen for providing this in the forum
+def ToWeight(y):
+    w = np.zeros(y.shape, dtype=float)
+    ind = y != 0
+    w[ind] = 1./(y[ind]**2)
+    return w
 
 
-
-
+def rmspe(yhat, y):
+    w = ToWeight(y)
+    rmspe = np.sqrt(np.mean( w * (y - yhat)**2 ))
+    return rmspe
 
 
 ############################## Executions ###################################
+# Prep data
+all_df = clean_rossman(RAW)
 
+# create sample helpers
+is_val = (all_df.is_val == 1) & (all_df.is_test == 0)
+is_trn = (all_df.is_val == 0) & (all_df.is_test == 0)
+is_test = (is_val == 0) & (is_trn == 0)
+
+# Create list of featuers
+non_feat = ['Id', 'is_test', 'is_val',
+            'Sales', 'Date', 'StateHoliday', 'Customers']
+Xfeats = create_feat_list(all_df, non_feat)
+
+
+# Run model
+frst = RandomForestRegressor(n_estimators=200, n_jobs=4)
+frst.fit(all_df[is_trn][Xfeats], all_df[is_trn].Sales.values)
+
+# Add feature importances code here
+# Use zip rather than previous methods
+
+# Score
+rmspe(all_df[is_val].Sales, frst.predict(all_df[is_val][Xfeats]))
+zip(all_df[is_val].Sales, frst.predict(all_df[is_val][Xfeats]))
