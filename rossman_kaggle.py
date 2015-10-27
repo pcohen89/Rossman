@@ -4,6 +4,8 @@ __author__ = 'loaner'
 ################################ Imports ###################################
 import pandas as pd
 import numpy as np
+import xgboost as xgb
+import math
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestRegressor
 
@@ -159,6 +161,51 @@ def rmspe(yhat, y):
     return rmspe
 
 
+def write_xgb_preds(df, xgb_data, mod, pred_nm, scale, is_test=0):
+    """
+    This writes predictions from an XGBOOST model into the data
+    Parameters
+    --------------
+    df: pandas dataframe to predict into
+    xgb_data: XGB dataframe (built from same data as df,
+             with features used by mod)
+    mod: XGB model used for predictions
+    pred_nm: prediction naming convention
+    scale: (float) this is the power to raise predictions to pred^scale
+    Output
+    --------------
+    data frame with predictions
+    """
+    # Create name for predictions column
+    nm = 'preds'+str(pred_nm)
+    # Predict and rescale (rescales to e^pred - 1)
+    df[nm] = mod.predict(xgb_data)
+    df[nm] = df[nm].apply(lambda x: math.exp(x)-1)
+    return df
+
+def create_grpd_stats(df, var):
+    """
+
+    :param df: dataframe
+    :param var: name of variable to group by
+    :return: df with new features
+    """
+    grouped_sales = df[is_trn].groupby(var).Sales
+    # Create medians
+    median_grpd = grouped_sales.median().reset_index()
+    median_grpd.columns = [var, var + '_median']
+    # Create means
+    mean_grpd = grouped_sales.mean().reset_index()
+    mean_grpd.columns = [var, var + '_mean']
+    # Create stds
+    std_grpd = grouped_sales.std().reset_index()
+    std_grpd.columns = [var, var + '_std']
+    # Do merges
+    for df in [median_grpd, mean_grpd, std_grpd]:
+        df = df.merge(median_grpd, on=var)
+    return df
+
+
 ############################## Executions ###################################
 # Prep data
 all_df = clean_rossman(RAW)
@@ -168,19 +215,39 @@ is_val = (all_df.is_val == 1) & (all_df.is_test == 0)
 is_trn = (all_df.is_val == 0) & (all_df.is_test == 0)
 is_test = (is_val == 0) & (is_trn == 0)
 
+# Create median features
+for feature in ['Store', 'DayOfWeek']:
+    all_df = create_grpd_stats(all_df, feature)
+
 # Create list of featuers
 non_feat = ['Id', 'is_test', 'is_val',
             'Sales', 'Date', 'StateHoliday', 'Customers']
 Xfeats = create_feat_list(all_df, non_feat)
 
+# things
+all_df.loc[all_df.Sales < 0, 'Sales'] = 0
 
 # Run model
-frst = RandomForestRegressor(n_estimators=200, n_jobs=4)
-frst.fit(all_df[is_trn][Xfeats], all_df[is_trn].Sales.values)
+#frst = RandomForestRegressor(n_estimators=200, n_jobs=4)
+#frst.fit(all_df[is_trn][Xfeats], all_df[is_trn].Sales.values)
+param = {'max_depth': 10, 'eta': .08,  'silent': 2, 'subsample': .75,
+         'colsample_bytree': .85, 'gamma': .00025}
+# Gradient boosting
+xgb_trn = xgb.DMatrix(np.array(all_df[is_trn][Xfeats]),
+                      label=all_df[is_trn].Sales.map(lambda x: np.log(x+1)))
+xgb_val = xgb.DMatrix(np.array(all_df[is_val][Xfeats]))
+for eta in [.03, .04, .05, .07, .12]:
+    param['eta'] = eta
+    xboost = xgb.train(param.items(), xgb_trn, 1400)
 
-# Add feature importances code here
-# Use zip rather than previous methods
+    preds = write_xgb_preds(all_df[is_val], xgb_val, xboost, '_xgb', 1)
 
-# Score
-rmspe(all_df[is_val].Sales, frst.predict(all_df[is_val][Xfeats]))
-zip(all_df[is_val].Sales, frst.predict(all_df[is_val][Xfeats]))
+    # Add feature importances code here
+    # Use zip rather than previous methods
+
+    # Score
+    all_df_nozero = all_df[all_df.Sales > 0]
+    preds = preds[preds.Sales > 0]
+
+    val = rmspe(preds[is_val].preds_xgb.values, all_df_nozero[is_val].Sales.values)
+    print "For eta %s score is: %s" % (eta, val)
