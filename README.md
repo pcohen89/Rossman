@@ -14,3 +14,4 @@ Kaggle competition. Will fill this out later
 - [ ] https://www.kaggle.com/c/rossmann-store-sales/forums/t/17048/putting-stores-on-the-map/96627#post96627
 - [ ] tag stores that are open on sundays
 - [ ] day of week
+- [ ] fit a first stage model in the train check its score tune it whatever, but then fit a random forest in the validation including the predictions from teh first stage model
