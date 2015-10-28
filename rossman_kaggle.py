@@ -5,6 +5,7 @@ __author__ = 'loaner'
 import pandas as pd
 import numpy as np
 import xgboost as xgb
+import time
 import math
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestRegressor
@@ -30,11 +31,12 @@ def loadappend_data(PATH, train="train.csv", test="test.csv"):
     return all_data
 
 
+
 def clean_rossman(PATH):
     df = loadappend_data(PATH)
     # encode date and strs
     df['py_date'] = df.Date.apply(lambda x: pd.to_datetime(x).toordinal())
-    df['holiday'] = LabelEncoder().fit_transform(df.StateHoliday)
+    df['state_holiday'] = LabelEncoder().fit_transform(df.StateHoliday)
     # load data about indvidual stores
     stores = pd.read_csv(RAW + 'store.csv')
     # encode strings
@@ -44,7 +46,7 @@ def clean_rossman(PATH):
         stores[col] = enc.fit_transform(stores[col])
     # rename cols
     new_names = [w.replace('Competition', '').replace('Since', '')
-              for w in stores.columns]
+                 for w in stores.columns]
     stores.columns = new_names
     # create continuous date variable
     stores['open_since'] = stores.OpenYear * 100 + stores.OpenMonth
@@ -157,11 +159,11 @@ def ToWeight(y):
 
 def rmspe(yhat, y):
     w = ToWeight(y)
-    rmspe = np.sqrt(np.mean( w * (y - yhat)**2 ))
+    rmspe = np.sqrt(np.mean(w * (y - yhat)**2))
     return rmspe
 
 
-def write_xgb_preds(df, xgb_data, mod, pred_nm, scale, is_test=0):
+def write_xgb_preds(df, xgb_data, mod, pred_nm, is_test=0):
     """
     This writes predictions from an XGBOOST model into the data
     Parameters
@@ -190,7 +192,7 @@ def create_grpd_stats(df, var):
     :param var: name of variable to group by
     :return: df with new features
     """
-    grouped_sales = df[is_trn].groupby(var).Sales
+    grouped_sales = df[(df.is_val == 0) & (df.is_test == 0)].groupby(var).Sales
     # Create medians
     median_grpd = grouped_sales.median().reset_index()
     median_grpd.columns = [var, var + '_median']
@@ -201,8 +203,8 @@ def create_grpd_stats(df, var):
     std_grpd = grouped_sales.std().reset_index()
     std_grpd.columns = [var, var + '_std']
     # Do merges
-    for df in [median_grpd, mean_grpd, std_grpd]:
-        df = df.merge(median_grpd, on=var)
+    for new_stats in [median_grpd, mean_grpd, std_grpd]:
+        df = df.merge(new_stats, on=var, how='left')
     return df
 
 
@@ -212,42 +214,50 @@ all_df = clean_rossman(RAW)
 
 # create sample helpers
 is_val = (all_df.is_val == 1) & (all_df.is_test == 0)
-is_trn = (all_df.is_val == 0) & (all_df.is_test == 0)
+
 is_test = (is_val == 0) & (is_trn == 0)
 
 # Create median features
-for feature in ['Store', 'DayOfWeek']:
+for feature in ['StoreType', 'Store', 'DayOfWeek']: #
     all_df = create_grpd_stats(all_df, feature)
 
-# Create list of featuers
-non_feat = ['Id', 'is_test', 'is_val',
-            'Sales', 'Date', 'StateHoliday', 'Customers']
+
+# Create list of features
+non_feat = ['Id', 'is_test', 'is_val', 'Sales', 'Date', 'Customers',
+            'StateHoliday']
 Xfeats = create_feat_list(all_df, non_feat)
 
-# things
-all_df.loc[all_df.Sales < 0, 'Sales'] = 0
+all_df.Sales[all_df.Sales < 0] = 0
+
+# Separate samples
+val = all_df[(all_df.is_val == 1) & (all_df.is_test == 0)]
+trn = all_df[(all_df.is_val == 0) & (all_df.is_test == 0)]
+test = all_df[(all_df.is_test == 1)]
+
+# Test features
+frst = RandomForestRegressor(n_estimators=200, n_jobs=4)
+frst.fit(trn[Xfeats], trn.Sales.values)
+results = pd.DataFrame(data=zip(Xfeats, frst.feature_importances_))
+print results.sort(columns=1, ascending=False)
 
 # Run model
-#frst = RandomForestRegressor(n_estimators=200, n_jobs=4)
-#frst.fit(all_df[is_trn][Xfeats], all_df[is_trn].Sales.values)
-param = {'max_depth': 10, 'eta': .08,  'silent': 2, 'subsample': .75,
+param = {'max_depth': 6, 'eta': .08,  'silent': 2, 'subsample': .75,
          'colsample_bytree': .85, 'gamma': .00025}
 # Gradient boosting
-xgb_trn = xgb.DMatrix(np.array(all_df[is_trn][Xfeats]),
-                      label=all_df[is_trn].Sales.map(lambda x: np.log(x+1)))
-xgb_val = xgb.DMatrix(np.array(all_df[is_val][Xfeats]))
-for eta in [.03, .04, .05, .07, .12]:
+xgb_trn = xgb.DMatrix(np.array(trn[Xfeats]),
+                      label=trn.Sales.map(lambda x: np.log(x+1)))
+xgb_val = xgb.DMatrix(np.array(val[Xfeats]))
+for eta in [.12,]:
+    t = time.time()
     param['eta'] = eta
-    xboost = xgb.train(param.items(), xgb_trn, 1400)
+    xboost = xgb.train(param.items(), xgb_trn, 1500)
 
-    preds = write_xgb_preds(all_df[is_val], xgb_val, xboost, '_xgb', 1)
+    preds = write_xgb_preds(val, xgb_val, xboost, '_xgb')
 
-    # Add feature importances code here
-    # Use zip rather than previous methods
-
-    # Score
+    # Score excludes zero sales days
     all_df_nozero = all_df[all_df.Sales > 0]
     preds = preds[preds.Sales > 0]
 
-    val = rmspe(preds[is_val].preds_xgb.values, all_df_nozero[is_val].Sales.values)
+    val = rmspe(preds.preds_xgb.values, val.Sales.values)
     print "For eta %s score is: %s" % (eta, val)
+    print "Loop took %s minutes" % ((time.time() - t)/60)
