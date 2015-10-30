@@ -31,34 +31,41 @@ def loadappend_data(PATH, train="train.csv", test="test.csv"):
     return all_data
 
 
-
 def clean_rossman(PATH):
     df = loadappend_data(PATH)
     # encode date and strs
-    df['py_date'] = df.Date.apply(lambda x: pd.to_datetime(x).toordinal())
-    df['state_holiday'] = LabelEncoder().fit_transform(df.StateHoliday)
+    df['month'] = df.Date.apply(lambda x: pd.to_datetime(x).month)
+    df['year'] = df.Date.apply(lambda x: pd.to_datetime(x).year)
+    df['quarter'] = ((df.month - 1)//3 + 1)
+    # previous day closed
+    df['prev_day_closed'] = df.Open.shift(1) == 0
+    df['next_day_closed'] = df.Open.shift(-1) == 0
     # load data about indvidual stores
     stores = pd.read_csv(RAW + 'store.csv')
-    # encode strings
-    enc = LabelEncoder()
-    cols_to_encode = ['StoreType', 'Assortment', 'PromoInterval']
-    for col in cols_to_encode:
-        stores[col] = enc.fit_transform(stores[col])
     # rename cols
-    new_names = [w.replace('Competition', '').replace('Since', '')
-                 for w in stores.columns]
-    stores.columns = new_names
+    stores.columns = [w.replace('Competition', '').replace('Since', '')
+                      for w in stores.columns]
+    # Create logged distance
+    stores['logged_dist'] = np.log(stores.Distance)
     # create continuous date variable
     stores['open_since'] = stores.OpenYear * 100 + stores.OpenMonth
     stores['promo_since'] = stores.Promo2Year * 100 + stores.Promo2Week
+    # merge stores to main
     df = df.merge(stores, on='Store')
-    # tag validtion
+    # encode strings
+    enc = LabelEncoder()
+    cols_to_enc = ['StoreType', 'Assortment', 'PromoInterval', 'StateHoliday']
+    for col in cols_to_enc:
+        df[col] = enc.fit_transform(df[col])
+    # tag validation
     df = tag_validation(df)
     # fill missings
+    df.Open.fillna(1, inplace=True)
     df.fillna(-1, inplace=True)
     return df
 
-def tag_validation(df, val_pct=.2):
+
+def tag_validation(df, val_pct=.03):
     df.sort('Date', inplace=True)
     # determine val obs
     trn_obs = len(df.ix[df.is_test == 0, 1])
@@ -67,29 +74,6 @@ def tag_validation(df, val_pct=.2):
     df['is_val'] = 0
     df['is_val'][val_obs:trn_obs] = 1
     return df
-
-
-def rmsle(actual, predicted):
-    """
-    #### __author__ = 'benhamner'
-    Computes the root mean squared log error.
-    This function computes the root mean squared log error between two lists
-    of numbers.
-    Parameters
-    ----------
-    actual : list of numbers, numpy array
-             The ground truth value
-    predicted : same type as actual
-                The predicted value
-    Returns
-    -------
-    score : double
-            The root mean squared log error between actual and predicted
-    """
-    sle_val = (np.power(np.log(np.array(actual)+1) -
-               np.log(np.array(predicted)+1), 2))
-    msle_val = np.mean(sle_val)
-    return np.sqrt(msle_val)
 
 
 def create_feat_list(df, non_features):
@@ -103,8 +87,8 @@ def subm_correl(subm1, subm2, id, target):
     """
     Measures correlation between to Kaggle submissions
     """
-    subm1 = pd.read_csv(SUBM_PATH + subm1)
-    subm2 = pd.read_csv(SUBM_PATH + subm2)
+    subm1 = pd.read_csv(subm1)
+    subm2 = pd.read_csv(subm2)
     subm2 = subm2.rename(columns={target: 'target2'})
     merged_df = subm1.merge(subm2, on=id)
     return merged_df.corr()
@@ -130,7 +114,7 @@ def merge_subms(subm_dict, path, name, target):
         subm = subm.drop('target2', 1)
     subm.to_csv(path+name, index=False)
 
-def check_weight_and_merge(dict, name):
+def check_weight_and_merge(dict, name, path):
     """
     :param dict: file, weight pairs
     :param name: name of resulting blended file
@@ -140,14 +124,7 @@ def check_weight_and_merge(dict, name):
     for key, val in dict.iteritems():
         total_weight += val
     print "The total weight should be 1.0, it is: %s" % (total_weight)
-    merge_subms(dict, SUBM_PATH, name, 'cost')
-
-def feat_importances(frst, feats):
-    outputs = pd.DataFrame({'feats': feats,
-                            'weight': frst.feature_importances_})
-    outputs = outputs.sort(columns='weight', ascending=False)
-    return outputs
-
+    merge_subms(dict, path, name, 'cost')
 
 # Thanks to Chenglong Chen for providing this in the forum
 def ToWeight(y):
@@ -162,6 +139,15 @@ def rmspe(yhat, y):
     rmspe = np.sqrt(np.mean(w * (y - yhat)**2))
     return rmspe
 
+def rmspe_xg(yhat, y):
+    # y = y.values
+    y = y.get_label()
+    y = np.exp(y) - 1
+    yhat = np.exp(yhat) - 1
+    w = ToWeight(y)
+    rmspe = np.sqrt(np.mean(w * (y - yhat)**2))
+    return "rmspe", rmspe
+
 
 def write_xgb_preds(df, xgb_data, mod, pred_nm, is_test=0):
     """
@@ -173,7 +159,6 @@ def write_xgb_preds(df, xgb_data, mod, pred_nm, is_test=0):
              with features used by mod)
     mod: XGB model used for predictions
     pred_nm: prediction naming convention
-    scale: (float) this is the power to raise predictions to pred^scale
     Output
     --------------
     data frame with predictions
@@ -185,79 +170,73 @@ def write_xgb_preds(df, xgb_data, mod, pred_nm, is_test=0):
     df[nm] = df[nm].apply(lambda x: math.exp(x)-1)
     return df
 
-def create_grpd_stats(df, var):
-    """
-
-    :param df: dataframe
-    :param var: name of variable to group by
-    :return: df with new features
-    """
-    grouped_sales = df[(df.is_val == 0) & (df.is_test == 0)].groupby(var).Sales
-    # Create medians
-    median_grpd = grouped_sales.median().reset_index()
-    median_grpd.columns = [var, var + '_median']
-    # Create means
-    mean_grpd = grouped_sales.mean().reset_index()
-    mean_grpd.columns = [var, var + '_mean']
-    # Create stds
-    std_grpd = grouped_sales.std().reset_index()
-    std_grpd.columns = [var, var + '_std']
-    # Do merges
-    for new_stats in [median_grpd, mean_grpd, std_grpd]:
-        df = df.merge(new_stats, on=var, how='left')
-    return df
-
+def feat_importances(frst, feats):
+    outputs = pd.DataFrame({'feats': feats,
+                            'weight': frst.feature_importances_})
+    outputs = outputs.sort(columns='weight', ascending=False)
+    print outputs
 
 ############################## Executions ###################################
 # Prep data
 all_df = clean_rossman(RAW)
 
-# create sample helpers
-is_val = (all_df.is_val == 1) & (all_df.is_test == 0)
-
-is_test = (is_val == 0) & (is_trn == 0)
-
-# Create median features
-for feature in ['StoreType', 'Store', 'DayOfWeek']: #
-    all_df = create_grpd_stats(all_df, feature)
-
+columns = ['Store', 'DayOfWeek', 'Promo']
+not_test = (all_df.is_test == 0)
+scores = all_df[not_test].groupby(columns)['Sales'].median().reset_index()
+scores.columns = columns + ['medians']
+all_df = all_df.merge(scores, on=columns)
 
 # Create list of features
 non_feat = ['Id', 'is_test', 'is_val', 'Sales', 'Date', 'Customers',
-            'StateHoliday']
+            'StateHoliday', 'medians']
 Xfeats = create_feat_list(all_df, non_feat)
 
 all_df.Sales[all_df.Sales < 0] = 0
+all_df = all_df[all_df.Open == 1]
 
 # Separate samples
 val = all_df[(all_df.is_val == 1) & (all_df.is_test == 0)]
 trn = all_df[(all_df.is_val == 0) & (all_df.is_test == 0)]
 test = all_df[(all_df.is_test == 1)]
 
-# Test features
-frst = RandomForestRegressor(n_estimators=200, n_jobs=4)
-frst.fit(trn[Xfeats], trn.Sales.values)
-results = pd.DataFrame(data=zip(Xfeats, frst.feature_importances_))
-print results.sort(columns=1, ascending=False)
+frst = RandomForestRegressor(n_estimators=1000, max_depth=22,
+                             max_features=int(len(Xfeats)*.66))
+frst.fit(trn[Xfeats], np.log(trn.Sales+1))
+feat_importances(frst, Xfeats)
+rmspe(np.exp(frst.predict(val[Xfeats]))-1, val.Sales.values)
+
 
 # Run model
-param = {'max_depth': 6, 'eta': .08,  'silent': 2, 'subsample': .75,
-         'colsample_bytree': .85, 'gamma': .00025}
+param = {'max_depth': 10, 'eta': .08,  'silent': 2, 'subsample': .75}
 # Gradient boosting
 xgb_trn = xgb.DMatrix(np.array(trn[Xfeats]),
                       label=trn.Sales.map(lambda x: np.log(x+1)))
-xgb_val = xgb.DMatrix(np.array(val[Xfeats]))
-for eta in [.12,]:
+xgb_val = xgb.DMatrix(np.array(val[Xfeats]),
+                      label=val.Sales.map(lambda x: np.log(x+1)))
+xgb_test = xgb.DMatrix(np.array(test[Xfeats]))
+for eta in [.04, ]:
     t = time.time()
     param['eta'] = eta
-    xboost = xgb.train(param.items(), xgb_trn, 1500)
+    watch = [(xgb_val, 'eval'), (xgb_trn, 'train')]
+    xboost = xgb.train(param.items(), xgb_trn, 750, evals=watch, verbose_eval=True)
 
-    preds = write_xgb_preds(val, xgb_val, xboost, '_xgb')
+    val = write_xgb_preds(val, xgb_val, xboost, '_xgb')
+    test = write_xgb_preds(test, xgb_test, xboost, '_xgb')
 
     # Score excludes zero sales days
-    all_df_nozero = all_df[all_df.Sales > 0]
-    preds = preds[preds.Sales > 0]
-
-    val = rmspe(preds.preds_xgb.values, val.Sales.values)
-    print "For eta %s score is: %s" % (eta, val)
+    val = val[val.Sales > 0]
+    score = rmspe(val.preds_xgb.values, val.Sales.values)
+    median = rmspe(val.medians, val.Sales.values)
+    print "For eta %s score is: %s compared to median: %s" % (eta, score, median)
     print "Loop took %s minutes" % ((time.time() - t)/60)
+
+# Create a submission
+test_preds = .1*test.medians + .9*test.preds_xgb
+subm = pd.DataFrame(zip(test.Id, test_preds),
+                    columns=['Id', 'Sales'])
+subm.Id = subm.Id.astype('int')
+subm.to_csv(RAW + "../Submission/xgb w month and year blended with medians.csv", index=False)
+
+subm_correl(RAW + r"../Submission/xgb w month and year.csv",
+            RAW + r"../Submission/xgb w month and year blended with medians.csv", r'Id', r'Sales')
+
