@@ -15,3 +15,4 @@ Kaggle competition. Will fill this out later
 - [ ] tag stores that are open on sundays
 - [ ] day of week
 - [ ] fit a first stage model in the train check its score tune it whatever, but then fit a random forest in the validation including the predictions from teh first stage model
+- [ ] was store closed on previous day
