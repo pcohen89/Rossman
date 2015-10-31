@@ -8,7 +8,7 @@ import xgboost as xgb
 import time
 import math
 from sklearn.preprocessing import LabelEncoder
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor as Forest
 
 
 ################################ Globals ###################################
@@ -52,9 +52,13 @@ def clean_rossman(PATH):
     stores['promo_since'] = stores.Promo2Year * 100 + stores.Promo2Week
     # merge stores to main
     df = df.merge(stores, on='Store')
+    # merge on locations compliments of the forums
+    locs = pd.read_csv(RAW + 'store_states.csv')
+    df = df.merge(locs, on='Store')
     # encode strings
     enc = LabelEncoder()
-    cols_to_enc = ['StoreType', 'Assortment', 'PromoInterval', 'StateHoliday']
+    cols_to_enc = ['StoreType', 'Assortment', 'PromoInterval', 'StateHoliday',
+                   'State']
     for col in cols_to_enc:
         df[col] = enc.fit_transform(df[col])
     # tag validation
@@ -179,46 +183,49 @@ def feat_importances(frst, feats):
 ############################## Executions ###################################
 # Prep data
 all_df = clean_rossman(RAW)
+all_df.Sales[all_df.Sales < 0] = 0
+not_test = (all_df.is_test == 0)
 
 columns = ['Store', 'DayOfWeek', 'Promo']
-not_test = (all_df.is_test == 0)
 scores = all_df[not_test].groupby(columns)['Sales'].median().reset_index()
 scores.columns = columns + ['medians']
 all_df = all_df.merge(scores, on=columns)
 
 # Create list of features
 non_feat = ['Id', 'is_test', 'is_val', 'Sales', 'Date', 'Customers',
-            'StateHoliday', 'medians']
+            'StateHoliday', 'medians', 'Open']
 Xfeats = create_feat_list(all_df, non_feat)
 
-all_df.Sales[all_df.Sales < 0] = 0
-all_df = all_df[all_df.Open == 1]
+# Create weights
+all_df['weights'] = 1 - 1/all_df.py_date
 
 # Separate samples
 val = all_df[(all_df.is_val == 1) & (all_df.is_test == 0)]
 trn = all_df[(all_df.is_val == 0) & (all_df.is_test == 0)]
+trn = trn[trn.Open == 1]
 test = all_df[(all_df.is_test == 1)]
 
-frst = RandomForestRegressor(n_estimators=1000, max_depth=22,
-                             max_features=int(len(Xfeats)*.66))
+num_feats = int(len(Xfeats)*.66)
+frst = RandomForestRegressor(n_estimators=200, max_depth=34, max_features=num_feats)
 frst.fit(trn[Xfeats], np.log(trn.Sales+1))
 feat_importances(frst, Xfeats)
 rmspe(np.exp(frst.predict(val[Xfeats]))-1, val.Sales.values)
 
 
 # Run model
-param = {'max_depth': 10, 'eta': .08,  'silent': 2, 'subsample': .75}
+param = {'max_depth': 10, 'eta': .08,  'silent': 1, 'subsample': .75,
+         'colsample_bytree': .8}
 # Gradient boosting
 xgb_trn = xgb.DMatrix(np.array(trn[Xfeats]),
                       label=trn.Sales.map(lambda x: np.log(x+1)))
 xgb_val = xgb.DMatrix(np.array(val[Xfeats]),
                       label=val.Sales.map(lambda x: np.log(x+1)))
 xgb_test = xgb.DMatrix(np.array(test[Xfeats]))
-for eta in [.04, ]:
+for eta in [.039, ]:
     t = time.time()
     param['eta'] = eta
     watch = [(xgb_val, 'eval'), (xgb_trn, 'train')]
-    xboost = xgb.train(param.items(), xgb_trn, 750, evals=watch, verbose_eval=True)
+    xboost = xgb.train(param.items(), xgb_trn, 700, evals=watch, verbose_eval=True)
 
     val = write_xgb_preds(val, xgb_val, xboost, '_xgb')
     test = write_xgb_preds(test, xgb_test, xboost, '_xgb')
@@ -231,12 +238,13 @@ for eta in [.04, ]:
     print "Loop took %s minutes" % ((time.time() - t)/60)
 
 # Create a submission
-test_preds = .1*test.medians + .9*test.preds_xgb
+test['preds_frst'] = np.exp(frst.predict(test[Xfeats])) + 1
+test_preds = .1*test.medians + .6*test.preds_xgb + .3*test.preds_frst
 subm = pd.DataFrame(zip(test.Id, test_preds),
                     columns=['Id', 'Sales'])
 subm.Id = subm.Id.astype('int')
-subm.to_csv(RAW + "../Submission/xgb w month and year blended with medians.csv", index=False)
+subm.to_csv(RAW + "../Submission/new vars xgb frst and medians fixed frst.csv", index=False)
 
-subm_correl(RAW + r"../Submission/xgb w month and year.csv",
+subm_correl(RAW + r"../Submission/new vars xgb frst and medians fixed frst.csv",
             RAW + r"../Submission/xgb w month and year blended with medians.csv", r'Id', r'Sales')
 
