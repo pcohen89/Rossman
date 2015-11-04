@@ -3,6 +3,7 @@ __author__ = 'loaner'
 
 ################################ Imports ###################################
 import pandas as pd
+from pandas import to_datetime as to_dt
 import numpy as np
 import xgboost as xgb
 import time
@@ -30,18 +31,9 @@ def loadappend_data(PATH, train="train.csv", test="test.csv"):
     all_data = train.append(test, ignore_index=True)
     return all_data
 
-
-def clean_rossman(PATH):
-    df = loadappend_data(PATH)
-    # encode date and strs
-    df['month'] = df.Date.apply(lambda x: pd.to_datetime(x).month)
-    df['year'] = df.Date.apply(lambda x: pd.to_datetime(x).year)
-    df['quarter'] = ((df.month - 1)//3 + 1)
-    # previous day closed
-    df['prev_day_closed'] = df.Open.shift(1) == 0
-    df['next_day_closed'] = df.Open.shift(-1) == 0
+def clean_stores(path):
     # load data about indvidual stores
-    stores = pd.read_csv(RAW + 'store.csv')
+    stores = pd.read_csv(path)
     # rename cols
     stores.columns = [w.replace('Competition', '').replace('Since', '')
                       for w in stores.columns]
@@ -50,11 +42,27 @@ def clean_rossman(PATH):
     # create continuous date variable
     stores['open_since'] = stores.OpenYear * 100 + stores.OpenMonth
     stores['promo_since'] = stores.Promo2Year * 100 + stores.Promo2Week
+    return stores
+
+
+def clean_date(df):
+    df['day'] = to_dt(df.Date).dt.day
+    df['month'] = df.Date.apply(lambda x: pd.to_datetime(x).month)
+    df['year'] = df.Date.apply(lambda x: pd.to_datetime(x).year)
+    df['quarter'] = ((df.month - 1)//3 + 1)
+    df['prev_day_closed'] = df.Open.shift(1) == 0
+    df['next_day_closed'] = df.Open.shift(-1) == 0
+    return df
+
+
+def clean_rossman(PATH):
+    df = loadappend_data(PATH)
+    df = clean_date(df)
     # merge stores to main
+    stores = clean_stores(RAW + 'store.csv')
     df = df.merge(stores, on='Store')
     # merge on locations compliments of the forums
-    locs = pd.read_csv(RAW + 'store_states.csv')
-    df = df.merge(locs, on='Store')
+    df = df.merge(pd.read_csv(RAW + 'store_states.csv'), on='Store')
     # encode strings
     enc = LabelEncoder()
     cols_to_enc = ['StoreType', 'Assortment', 'PromoInterval', 'StateHoliday',
@@ -63,13 +71,21 @@ def clean_rossman(PATH):
         df[col] = enc.fit_transform(df[col])
     # tag validation
     df = tag_validation(df)
+    # Create median, mean, std
+    df = create_categorical_medians(df, ['Store', 'DayOfWeek', 'Promo'])
     # fill missings
     df.Open.fillna(1, inplace=True)
     df.fillna(-1, inplace=True)
     return df
 
 
-def tag_validation(df, val_pct=.03):
+def create_categorical_medians(df, columns):
+    grpd = df[(df.is_test == 0) & (df.is_val == 0)].groupby(columns)['Sales']
+    cat_moments = grpd.aggregate([np.median, np.mean, np.std]).reset_index()
+    df = df.merge(cat_moments, on=columns)
+    return df
+
+def tag_validation(df, val_pct=.011):
     df.sort('Date', inplace=True)
     # determine val obs
     trn_obs = len(df.ix[df.is_test == 0, 1])
@@ -86,49 +102,6 @@ def create_feat_list(df, non_features):
         feats.remove(var)
     return feats
 
-
-def subm_correl(subm1, subm2, id, target):
-    """
-    Measures correlation between to Kaggle submissions
-    """
-    subm1 = pd.read_csv(subm1)
-    subm2 = pd.read_csv(subm2)
-    subm2 = subm2.rename(columns={target: 'target2'})
-    merged_df = subm1.merge(subm2, on=id)
-    return merged_df.corr()
-
-def merge_subms(subm_dict, path, name, target):
-    """
-    :param subm_dict: Dictionary of dfs to merge, where key is csv name and
-    value is weight (values must sum to 1 to keep outcome in original range
-    :param path: path to submission folder
-    :param name: name of new file
-    :param target: outcome variable of submission
-    :return:
-    """
-    subm = pd.read_csv(path+'template.csv')
-    for csv, weight in subm_dict.iteritems():
-        # Read in a new csv
-        score = pd.read_csv(path+csv)
-        # rename target to avoid merge issues
-        score = score.rename(columns={target: 'target2'})
-        # Merge files to be averaged
-        subm = subm.merge(score, on='id')
-        subm[target] += weight * subm['target2']
-        subm = subm.drop('target2', 1)
-    subm.to_csv(path+name, index=False)
-
-def check_weight_and_merge(dict, name, path):
-    """
-    :param dict: file, weight pairs
-    :param name: name of resulting blended file
-    :return: blended file saved to server
-    """
-    total_weight = 0
-    for key, val in dict.iteritems():
-        total_weight += val
-    print "The total weight should be 1.0, it is: %s" % (total_weight)
-    merge_subms(dict, path, name, 'cost')
 
 # Thanks to Chenglong Chen for providing this in the forum
 def ToWeight(y):
@@ -184,67 +157,63 @@ def feat_importances(frst, feats):
 # Prep data
 all_df = clean_rossman(RAW)
 all_df.Sales[all_df.Sales < 0] = 0
-not_test = (all_df.is_test == 0)
-
-columns = ['Store', 'DayOfWeek', 'Promo']
-scores = all_df[not_test].groupby(columns)['Sales'].median().reset_index()
-scores.columns = columns + ['medians']
-all_df = all_df.merge(scores, on=columns)
-
-# Create list of features
-non_feat = ['Id', 'is_test', 'is_val', 'Sales', 'Date', 'Customers',
-            'StateHoliday', 'medians', 'Open']
-Xfeats = create_feat_list(all_df, non_feat)
 
 # Create weights
-all_df['weights'] = 1 - 1/all_df.py_date
+all_df['weights'] = 1 - 1/(to_dt(all_df.Date).astype('int')/10**18)**3
+
+# Create list of features
+non_feat = ['Id', 'is_test', 'is_val', 'Sales', 'Date', 'Customers', 'Open',
+            'weights']
+Xfeats = create_feat_list(all_df, non_feat)
 
 # Separate samples
-val = all_df[(all_df.is_val == 1) & (all_df.is_test == 0)]
-trn = all_df[(all_df.is_val == 0) & (all_df.is_test == 0)]
-trn = trn[trn.Open == 1]
+trn = all_df[(all_df.is_val == 0) & (all_df.is_test == 0) & (all_df.Open == 1)]
+val = all_df[(all_df.is_val == 1) & (all_df.is_test == 0) & (all_df.Sales > 0)]
 test = all_df[(all_df.is_test == 1)]
 
-num_feats = int(len(Xfeats)*.66)
-frst = RandomForestRegressor(n_estimators=200, max_depth=34, max_features=num_feats)
-frst.fit(trn[Xfeats], np.log(trn.Sales+1))
-feat_importances(frst, Xfeats)
-rmspe(np.exp(frst.predict(val[Xfeats]))-1, val.Sales.values)
+# Run random forest
+num_feats = int(len(Xfeats)*.2)
+trees = 200
+frst = Forest(n_estimators=trees, max_depth=35, max_features=4, n_jobs=-1, bootstrap=True)
+frst.fit(trn[Xfeats], np.log(trn.Sales+1), np.array(trn.weights))
 
+# Evaluate features and model
+feat_importances(frst, Xfeats)
+score = rmspe(np.exp(frst.predict(val[Xfeats]))-1, val.Sales.values)
+print "Forest w %s features & %s trees: %s" % (num_feats, trees, score)
+test['preds_frst'] = np.exp(frst.predict(test[Xfeats])) - 1
 
 # Run model
-param = {'max_depth': 10, 'eta': .08,  'silent': 1, 'subsample': .75,
-         'colsample_bytree': .8}
+param = {'max_depth': 10,  'silent': 1, 'subsample': .65,
+         'colsample_bytree': .6}
 # Gradient boosting
 xgb_trn = xgb.DMatrix(np.array(trn[Xfeats]),
-                      label=trn.Sales.map(lambda x: np.log(x+1)))
+                      label=trn.Sales.map(lambda x: np.log(x+1)),
+                      weight=np.array(trn.weights))
+
 xgb_val = xgb.DMatrix(np.array(val[Xfeats]),
                       label=val.Sales.map(lambda x: np.log(x+1)))
 xgb_test = xgb.DMatrix(np.array(test[Xfeats]))
-for eta in [.039, ]:
+for eta in [.011, ]: #.01
     t = time.time()
     param['eta'] = eta
     watch = [(xgb_val, 'eval'), (xgb_trn, 'train')]
-    xboost = xgb.train(param.items(), xgb_trn, 700, evals=watch, verbose_eval=True)
+    xboost = xgb.train(param.items(), xgb_trn, 3000, evals=watch) #3000
 
     val = write_xgb_preds(val, xgb_val, xboost, '_xgb')
     test = write_xgb_preds(test, xgb_test, xboost, '_xgb')
 
     # Score excludes zero sales days
-    val = val[val.Sales > 0]
     score = rmspe(val.preds_xgb.values, val.Sales.values)
-    median = rmspe(val.medians, val.Sales.values)
+    median = rmspe(val['median'], val.Sales.values)
     print "For eta %s score is: %s compared to median: %s" % (eta, score, median)
     print "Loop took %s minutes" % ((time.time() - t)/60)
 
 # Create a submission
-test['preds_frst'] = np.exp(frst.predict(test[Xfeats])) + 1
-test_preds = .1*test.medians + .6*test.preds_xgb + .3*test.preds_frst
+test_preds = .6*test.preds_xgb + .4*test.preds_frst
 subm = pd.DataFrame(zip(test.Id, test_preds),
                     columns=['Id', 'Sales'])
 subm.Id = subm.Id.astype('int')
-subm.to_csv(RAW + "../Submission/new vars xgb frst and medians fixed frst.csv", index=False)
+subm.to_csv(RAW + "../Submission/011 validation sample.csv", index=False)
 
-subm_correl(RAW + r"../Submission/new vars xgb frst and medians fixed frst.csv",
-            RAW + r"../Submission/xgb w month and year blended with medians.csv", r'Id', r'Sales')
 
