@@ -1,0 +1,15 @@
+WITH sessions_w_fences AS (
+SELECT
+	sess.session_id,
+	cerebro.id
+FROM sf_rider_sessions2015 s
+LEFT JOIN cerebro_geofences cg ON
+ST_Contains(cg.geom, s.geom)
+AND to_timestamp(s.year||s.month||s.day||s.hour, 'yymmddhh') BETWEEN cg.valid_from AND cg.valid_to
+)
+SELECT
+	pes.*,
+	swf.id
+FROM sf_product_eyeballs2015
+LEFT JOIN sessions_w_fences using(session_id);
+

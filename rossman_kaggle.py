@@ -50,14 +50,13 @@ def clean_date(df):
     df['month'] = df.Date.apply(lambda x: pd.to_datetime(x).month)
     df['year'] = df.Date.apply(lambda x: pd.to_datetime(x).year)
     df['quarter'] = ((df.month - 1)//3 + 1)
-    df['prev_day_closed'] = df.Open.shift(1) == 0
-    df['next_day_closed'] = df.Open.shift(-1) == 0
     return df
 
 
 def clean_rossman(PATH):
     df = loadappend_data(PATH)
     df = clean_date(df)
+
     # merge stores to main
     stores = clean_stores(RAW + 'store.csv')
     df = df.merge(stores, on='Store')
@@ -69,17 +68,25 @@ def clean_rossman(PATH):
                    'State']
     for col in cols_to_enc:
         df[col] = enc.fit_transform(df[col])
-    # tag validation
     df = tag_validation(df)
-    # Create median, mean, std
-    df = create_categorical_medians(df, ['Store', 'DayOfWeek', 'Promo'])
+    df = create_lags(df)
+    df = create_categorical_moments(df, ['Store', 'DayOfWeek', 'Promo'])
     # fill missings
     df.Open.fillna(1, inplace=True)
     df.fillna(-1, inplace=True)
     return df
 
+def create_lags(df):
+    df.sort(['Store', 'Date'], inplace=True)
+    df['prev_day_closed'] = df.Open.shift(1) == 0
+    df['next_day_closed'] = df.Open.shift(-1) == 0
+    df['lagged_sales'] = df.Sales.shift(365)
+    stores_nomatch = df.Store.shift(365) != df.Store
+    df.lagged_sales[stores_nomatch] = -1
+    return df
 
-def create_categorical_medians(df, columns):
+
+def create_categorical_moments(df, columns):
     grpd = df[(df.is_test == 0) & (df.is_val == 0)].groupby(columns)['Sales']
     cat_moments = grpd.aggregate([np.median, np.mean, np.std]).reset_index()
     df = df.merge(cat_moments, on=columns)
@@ -214,6 +221,6 @@ test_preds = .6*test.preds_xgb + .4*test.preds_frst
 subm = pd.DataFrame(zip(test.Id, test_preds),
                     columns=['Id', 'Sales'])
 subm.Id = subm.Id.astype('int')
-subm.to_csv(RAW + "../Submission/011 validation sample.csv", index=False)
+subm.to_csv(RAW + "../Submission/added year lagged.csv", index=False)
 
 
