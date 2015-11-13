@@ -1,5 +1,0 @@
-ALTER TABLE sf_rider_sessions2015 ADD COLUMN geom geometry;
-UPDATE geom SET geom = ST_MakePoint(lng, lat); 
-ALTER TABLE sf_rider_sessions2015 ALTER COLUMN geom SET NOT NULL;
-CREATE INDEX ON sf_rider_sessions2015 using gist(geom);
-CREATE INDEX ON cerebro_geofences using gist(geom);
